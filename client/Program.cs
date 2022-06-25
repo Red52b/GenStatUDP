@@ -8,19 +8,29 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO;
+using System.Xml;
+using System.Xml.Serialization;
 
 namespace UDP_client
 {
 	class Program
 	{
-		static IPAddress remoteAddress;
-		static DataProcessor dp = new DataProcessor();
+		static SetingsStruct mySettings = new SetingsStruct();
+		static DataProcessor dp;
 		static private Random rnd = new Random();
 
 		static void Main(string[] args)
 		{
-			remoteAddress = IPAddress.Parse("192.168.0.102");
+			Console.WriteLine("Client");
+			SettingsXmlHelper.Load();
 			
+			if(!SettingsXmlHelper.Check()){
+				return;
+			}
+
+			dp = new DataProcessor(mySettings.StatCore);
+
 			try
             {
 				Thread receiveThread = new Thread(new ThreadStart(RecieveMessages));
@@ -29,7 +39,6 @@ namespace UDP_client
 				Thread calcThread = new Thread(new ThreadStart(dp.WorkThread));
                 calcThread.Start();
 
-				Console.WriteLine("Client");
 
 				while (true)
                 {
@@ -41,22 +50,55 @@ namespace UDP_client
             {
                 Console.WriteLine(ex.Message);
             }
+
+			Console.ReadKey();
 		}
 
 		private static void RecieveMessages(){
-			UdpClient receiver = new UdpClient(9531);
-			IPEndPoint remoteIp = null;
-            string localAddress = "192.168.0.102";
+			byte[] data;
+			int tLastSec = 0;
+			bool resievePackets = true;
 
-            try
-            {
+			IPAddress remoteAddress = IPAddress.Parse(mySettings.Connection.CastGroup);
+			UdpClient receiver = new UdpClient(mySettings.Connection.Port);
+			IPEndPoint remoteIp = null;
+			bool adressIsOK = false;
+			IPEndPoint testEndPoint = new IPEndPoint(remoteAddress, mySettings.Connection.Port);
+			
+			byte[] adrBytes = remoteAddress.GetAddressBytes();
+			if(adrBytes[0] >= 224 && adrBytes[0]<240){
+				adressIsOK = true;
+				receiver.JoinMulticastGroup(remoteAddress);
+			}
+			else{
+				Console.WriteLine("Адрес 'CastGroup' не является адресом Broadcast-группы. Подключение не выполнено");
+			}
+			/**/
+			
+            try{
                 while (true)
                 {
-                    byte[] data = receiver.Receive(ref remoteIp); // получаем данные
-					dp.PushData(ref data);
-					if(rnd.Next(10000)<5){
-						Console.WriteLine("Sleep");
-						Thread.Sleep(1000);
+					if(receiver.Available>0){
+						data = receiver.Receive(ref remoteIp); // получаем данные
+						resievePackets = true;
+						dp.PushData(ref data);
+
+						if(mySettings.Connection.DelayPerod>10 && rnd.Next(mySettings.Connection.DelayPerod)<1){
+							Console.WriteLine("Sleep " + mySettings.Connection.DelayMiliSec);
+							Thread.Sleep(mySettings.Connection.DelayMiliSec);
+						}
+					}
+					if(DateTime.Now.Second != tLastSec && adressIsOK){
+						if(!resievePackets){
+							Console.WriteLine("Connection reinit");
+							receiver.Close();
+							receiver = new UdpClient(mySettings.Connection.Port);
+							receiver.JoinMulticastGroup(remoteAddress);
+						}
+						tLastSec = DateTime.Now.Second;
+						data = new byte[2];
+						receiver.Send(data, 2, testEndPoint);
+						resievePackets = false;
 					}
                 }
             }
@@ -71,25 +113,21 @@ namespace UDP_client
 		}
 
 		class DataProcessor{
-			private ulong firstTimeStamp=0, lastTimeStamp=0, recievedPackets=0;
+			private ulong firstTimeStamp=1, lastTimeStamp=0, recievedPackets=0;
 			private object packetStatisticLocker = new object();
 
-			private StaisticCore core = new StaisticCore();
+			private StatisticCore core;
 
-			public void PrintData(ref byte[] dataArr){
-				ulong timeStamp = BitConverter.ToUInt64(dataArr, 0);
-				double value = BitConverter.ToDouble(dataArr, 8);
-
-				string message = timeStamp.ToString("0000")+"   ---   value = "+value.ToString();
-                Console.WriteLine(message);
-
+			public DataProcessor(SetingsStruct.StatisticParms inPrams){
+				core = new StatisticCore(inPrams.ValuesPerPage, inPrams.ValuesMinStep);
 			}
 			public void PushData(ref byte[] dataArr){
+				if(dataArr.Length<12){			return;			}
 				ulong timeStamp = BitConverter.ToUInt64(dataArr, 0);
 				double value = BitConverter.ToDouble(dataArr, 8);
 
 				lock(packetStatisticLocker){
-					if(firstTimeStamp==0){
+					if(firstTimeStamp==1){
 						firstTimeStamp = timeStamp;
 					}
 					if(lastTimeStamp<timeStamp){
@@ -118,14 +156,14 @@ namespace UDP_client
 
 		}
 
-		class StaisticCore{
-			private const int cValPerPage = 100;
-			private const double cValMinStep = 1e-4;
+		class StatisticCore{
+			private int cValPerPage;
+			private double cValMinStep;
 			private decimal pgCoef, pgValStep;
 
 			private object locker = new object();
 			private ConcurrentQueue<double> inputBuffer = new ConcurrentQueue<double>();
-			private double valMax=-1e100, valMin=1e100;
+			private double valMax=-1e-100, valMin=1e100;
 			private ulong valuesInStore=0;
 			private decimal summOfStore=0;
 			private Random rnd;
@@ -133,6 +171,8 @@ namespace UDP_client
 			private SortedList<long, StatisticDatapage> pages = new SortedList<long,StatisticDatapage>();
 
 			private void DatastoreUpdate(){
+				if(valMax<valMin){		return;		}
+
 				long minPage, maxPage, currPage;
 				StatisticDatapage currSDP;
 				minPage = (int)(valMin/cValMinStep)/cValPerPage;
@@ -167,7 +207,7 @@ namespace UDP_client
 						cellIndex = (int)(valInPip-pageIndex*cValPerPage);
 						pages[pageIndex].IncreaseCell(cellIndex);
 						valuesInStore++;
-						summOfStore += (decimal)valInPip;
+						summOfStore += (decimal)valInPip;	
 					}
 				}
 			}
@@ -294,8 +334,11 @@ namespace UDP_client
 				}
 			}
 
-			public StaisticCore(){
+			public StatisticCore(int inValPerPage, double inValMinStep){
 				rnd = new Random();
+
+				cValPerPage = inValPerPage;
+				cValMinStep = inValMinStep;
 
 				pgCoef = (decimal) (cValMinStep*cValPerPage);
 				pgValStep = (decimal) cValMinStep;
@@ -353,5 +396,78 @@ namespace UDP_client
 			public ulong Count{get{ return valuesCount; }}
 			public decimal Summ{get{ return valuesSumm; }}
 		}
+		
+		
+		static public class SettingsXmlHelper{
+			const string fileName = "client_config.xml";
+			static public void Save(){
+				XmlSerializer serializer = new XmlSerializer(typeof(SetingsStruct));
+				TextWriter writer = new StreamWriter(fileName);
+				mySettings.Connection.CastGroup="235.35.35.0";
+
+				serializer.Serialize(writer, mySettings);
+				writer.Close();
+			}
+			static public void Load(){
+				FileStream fs = null;
+				XmlSerializer serializer;
+
+				try{
+					fs = new FileStream(fileName, FileMode.Open);
+					serializer = new XmlSerializer(typeof(SetingsStruct));
+
+					mySettings = (SetingsStruct) serializer.Deserialize(fs);
+				}
+				catch (FileNotFoundException ex){
+					Console.WriteLine("Файл настроек не найден. Проверьте наличие '"+fileName+"' в папке прогрммы");
+					if(ex != null){		ex = null;		}	// затычка чтоб Warning`а не было
+				}
+				catch (Exception ex){
+					Console.WriteLine(ex.Message);
+				}
+				finally{
+					//	fs?.Close();	// ?. еще не добавили
+					if(fs!=null){
+						fs.Close();
+					}
+				}
+				
+			}
+			static public bool Check(){
+				if(mySettings.Connection.CastGroup==null || mySettings.Connection.CastGroup.Length==0){
+					Console.WriteLine("Не удалось загрузить файл параметров");
+					return false;
+				}
+				if(mySettings.Connection.Port==0){
+					Console.WriteLine("Не указан 'Port' подключения");
+					return false;
+				}
+				if(mySettings.StatCore.ValuesMinStep <= 0){
+					Console.WriteLine("Параметр 'ValuesMinStep' должен быть больше нуля");
+					return false;
+				}
+				if(mySettings.StatCore.ValuesPerPage < 10){
+					mySettings.StatCore.ValuesPerPage = 10;
+				}
+				return true;
+			}
+		}
+	}
+
+	[XmlRootAttribute("Setings")]
+	public class SetingsStruct{
+		public struct ConnectionParms{
+			[XmlAttribute] public string CastGroup;
+			[XmlAttribute] public int Port;
+			[XmlAttribute] public int DelayMiliSec;
+			[XmlAttribute] public int DelayPerod;
+		}
+		public struct StatisticParms{
+			[XmlAttribute] public int ValuesPerPage;
+			[XmlAttribute] public double ValuesMinStep;
+		}
+
+		public ConnectionParms Connection;
+		public StatisticParms StatCore;
 	}
 }
