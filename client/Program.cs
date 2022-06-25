@@ -103,10 +103,14 @@ namespace UDP_client
 		class StaisticCore{
 			private const int cValPerPage = 100;
 			private const double cValMinStep = 1e-4;
+			private decimal pgCoef, pgValStep;
 
+			private object locker = new object();
 			private ConcurrentQueue<double> inputBuffer = new ConcurrentQueue<double>();
 			private double valMax=-1e100, valMin=1e100;
 			private ulong valuesInStore=0;
+			private decimal summOfStore=0;
+			private Random rnd;
 			
 			private SortedList<long, StatisticDatapage> pages = new SortedList<long,StatisticDatapage>();
 
@@ -135,34 +139,69 @@ namespace UDP_client
 			}
 			private void DataPutToStore(int inCountToProcess){
 				double currVal;
-				long pageIndex;
+				long pageIndex, valInPip;
 				int cellIndex;
 				while(inCountToProcess>0){
 					inCountToProcess--;
 					if(inputBuffer.TryDequeue(out currVal)){
-						pageIndex = (long)(currVal/cValMinStep)/cValPerPage;
-						cellIndex = (int)((long)(currVal/cValMinStep)-pageIndex*cValPerPage);
+						valInPip = (long)(currVal/cValMinStep);
+						pageIndex = valInPip/cValPerPage;
+						cellIndex = (int)(valInPip-pageIndex*cValPerPage);
 						pages[pageIndex].IncreaseCell(cellIndex);
 						valuesInStore++;
+						summOfStore += (decimal)valInPip;
 					}
 				}
 			}
-			public void CalcStatParam(){
-				Stopwatch timer = new Stopwatch();
-				timer.Start();
-				int i,j;
-				decimal ma=0, median=0, pageVal, pgCoef, pgValStep;
-				pgCoef = (decimal) (cValMinStep*cValPerPage);
-				pgValStep = (decimal) cValMinStep;
-
+			
+			private decimal CalcMA_Slow(){
+				int i;
+				decimal ma=0, pageVal;
 				for(i=pages.Count-1; i>=0; i--){
 					pageVal = pages.Keys[i]*pgCoef;
 					ma += pageVal*pages.Values[i].Count + pages.Values[i].Summ*pgValStep;
 				}
+				
 				ma /= valuesInStore;
+				return ma;
+			}
+			private decimal CalcMA_Fast(){
+				return summOfStore/valuesInStore*(decimal)cValMinStep;
+			}
+			private decimal CalcSigma_Slow(decimal inMA){
+				int i,j;
+				decimal sigma=0, pgValPart, currDeltaVal;
+				StatisticDatapage currPage;
+				for(i=pages.Count-1; i>=0; i--){
+					currPage = pages.Values[i];
+					pgValPart = pages.Keys[i]*pgCoef;
+					for(j=0; j<cValPerPage; j++){
+						currDeltaVal = (pgValPart + j*pgValStep) - inMA;		// ( X - M(X) )
+						sigma += currDeltaVal*currDeltaVal * currPage.data[j];	// квадрат разности умножаем на кол-во повторений
+					}
+				}
 
+				sigma = (decimal)Math.Pow((double)sigma/valuesInStore, 0.5);
+				return sigma;
+			}
+			private decimal CalcSigma_Fast(decimal inMA){
+				int i;
+				decimal sigma=0, currDeltaVal;
+				for(i=pages.Count-1; i>=0; i--){
+					currDeltaVal = (pages.Keys[i]*pgCoef + pgValStep/2) - inMA;
+					sigma += currDeltaVal*currDeltaVal * pages.Values[i].Count;
+				}
+
+				sigma = (decimal)Math.Pow((double)sigma/valuesInStore, 0.5);
+				return sigma;
+			}
+			
+			private decimal CalcMedian(){
+				int i,j;
+				decimal median=0;
 				ulong halfCount = valuesInStore/2;
 				ulong currCount=0;
+
 				for(i=pages.Count-1; i>=0; i--){
 					currCount += pages.Values[i].Count;
 					if(currCount>=halfCount){		break;		}
@@ -175,8 +214,11 @@ namespace UDP_client
 					}
 					median = pages.Keys[i]*pgCoef + interestinPage.data[j]*pgValStep;
 				}
-
-				decimal modaNumber=-1;
+				return median;
+			}
+			private decimal CalcModa(){
+				int i;
+				decimal modaNumber=0;
 				uint currModaVal=0;
 				for(i=pages.Count-1; i>=0; i--){
 					if(pages.Values[i].ModaVal > currModaVal){
@@ -184,18 +226,61 @@ namespace UDP_client
 						modaNumber = pages.Keys[i]*pgCoef + pages.Values[i].ModaCrd*pgValStep;
 					}
 				}
-
-
-
-				timer.Stop();
-				TimeSpan ts = timer.Elapsed;
+				return modaNumber;
+			}
+			
+			public void CalcStatParam(){
+				decimal ma, sigma, median, moda;
+				long prevTicks=0;
+				
 				Console.WriteLine();
-				Console.WriteLine("dT = "+ ts.TotalMilliseconds);
-				Console.WriteLine("    median = " + median + "   moda = " + modaNumber +"   MA = " + ma );
+				Console.WriteLine("valuses in store = " + valuesInStore + "     psges = " + pages.Count);
+				if(valuesInStore==0){		return;		}
+
+				lock(locker){
+					//	лок нужен чтоб ThreadProcess() не добавлял новых значений в хранилище пока мы считаем параметры
+					Stopwatch timer = new Stopwatch();
+					timer.Start();
+					
+					int currQueueLen = inputBuffer.Count;
+					DatastoreUpdate();
+					DataPutToStore(currQueueLen);
+					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   Queue flush.");
+					prevTicks = timer.ElapsedTicks;
+					
+					ma = CalcMA_Fast();
+					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   MA = " + ma);
+					prevTicks = timer.ElapsedTicks;
+					
+					if(pages.Count<100){
+						sigma = CalcSigma_Slow(ma);
+						Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   sigma (slow) = " + sigma);
+						prevTicks = timer.ElapsedTicks;
+					}
+					
+					sigma = CalcSigma_Fast(ma);
+					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   sigma (fast) = " + sigma);
+					prevTicks = timer.ElapsedTicks;
+
+					median = CalcMedian();
+					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   Median = " + median);
+					prevTicks = timer.ElapsedTicks;
+
+					moda = CalcModa();
+					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   Moda = " + moda);
+					prevTicks = timer.ElapsedTicks;
+
+					timer.Stop();
+					Console.WriteLine("total dT = "+ timer.ElapsedTicks + "   in MiliSec = " + timer.Elapsed.TotalMilliseconds);
+					Console.WriteLine("new data during calc time = "+ inputBuffer.Count);
+				}
 			}
 
 			public StaisticCore(){
-				
+				rnd = new Random();
+
+				pgCoef = (decimal) (cValMinStep*cValPerPage);
+				pgValStep = (decimal) cValMinStep;
 			}
 			public void PushValue(double inValue){
 				if(inValue>valMax){
@@ -210,9 +295,11 @@ namespace UDP_client
 
 			public void ThreadProcess(){
 				if(inputBuffer.Count<100){		return;		}
-
-				DatastoreUpdate();
-				DataPutToStore(100);
+				
+				lock(locker){
+					DatastoreUpdate();
+					DataPutToStore(100);
+				}
 			}
 
 		}
