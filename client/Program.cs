@@ -15,6 +15,7 @@ namespace UDP_client
 	{
 		static IPAddress remoteAddress;
 		static DataProcessor dp = new DataProcessor();
+		static private Random rnd = new Random();
 
 		static void Main(string[] args)
 		{
@@ -43,8 +44,6 @@ namespace UDP_client
 		}
 
 		private static void RecieveMessages(){
-			
-			
 			UdpClient receiver = new UdpClient(9531);
 			IPEndPoint remoteIp = null;
             string localAddress = "192.168.0.102";
@@ -55,6 +54,10 @@ namespace UDP_client
                 {
                     byte[] data = receiver.Receive(ref remoteIp); // получаем данные
 					dp.PushData(ref data);
+					if(rnd.Next(10000)<5){
+						Console.WriteLine("Sleep");
+						Thread.Sleep(1000);
+					}
                 }
             }
             catch (Exception ex)
@@ -68,8 +71,8 @@ namespace UDP_client
 		}
 
 		class DataProcessor{
-			private long missedPacketCount=0;
-			private ulong lastTimeStamp=0;
+			private ulong firstTimeStamp=0, lastTimeStamp=0, recievedPackets=0;
+			private object packetStatisticLocker = new object();
 
 			private StaisticCore core = new StaisticCore();
 
@@ -85,10 +88,25 @@ namespace UDP_client
 				ulong timeStamp = BitConverter.ToUInt64(dataArr, 0);
 				double value = BitConverter.ToDouble(dataArr, 8);
 
+				lock(packetStatisticLocker){
+					if(firstTimeStamp==0){
+						firstTimeStamp = timeStamp;
+					}
+					if(lastTimeStamp<timeStamp){
+						lastTimeStamp = timeStamp;
+					}
+					recievedPackets++;
+				}
 				core.PushValue(value);
 			}
 			public void CalcDataParam(){
-				core.CalcStatParam();
+				ulong missedPackets = (lastTimeStamp-firstTimeStamp+1) - recievedPackets;
+				lock(packetStatisticLocker){
+					Console.WriteLine();
+					Console.WriteLine("Packets recieved = " + recievedPackets + "   Packets missed = " + missedPackets);
+				}
+				core.CalcStatistic();
+				
 			}
 
 			public void WorkThread(){
@@ -229,13 +247,10 @@ namespace UDP_client
 				return modaNumber;
 			}
 			
-			public void CalcStatParam(){
+			public void CalcStatistic(){
 				decimal ma, sigma, median, moda;
 				long prevTicks=0;
 				
-				Console.WriteLine();
-				Console.WriteLine("valuses in store = " + valuesInStore + "     psges = " + pages.Count);
-				if(valuesInStore==0){		return;		}
 
 				lock(locker){
 					//	лок нужен чтоб ThreadProcess() не добавлял новых значений в хранилище пока мы считаем параметры
@@ -247,6 +262,9 @@ namespace UDP_client
 					DataPutToStore(currQueueLen);
 					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   Queue flush.");
 					prevTicks = timer.ElapsedTicks;
+
+					Console.WriteLine("valuses in store = " + valuesInStore + "     psges = " + pages.Count);
+					if(valuesInStore==0){		return;		}
 					
 					ma = CalcMA_Fast();
 					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   MA = " + ma);
