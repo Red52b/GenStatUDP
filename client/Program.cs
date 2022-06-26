@@ -26,6 +26,7 @@ namespace UDP_client
 			SettingsXmlHelper.Load();
 			
 			if(!SettingsXmlHelper.Check()){
+				Console.ReadKey();
 				return;
 			}
 
@@ -119,7 +120,7 @@ namespace UDP_client
 			private StatisticCore core;
 
 			public DataProcessor(SetingsStruct.StatisticParms inPrams){
-				core = new StatisticCore(inPrams.ValuesPerPage, inPrams.ValuesMinStep);
+				core = new StatisticCore(inPrams.ValuesPerPage, inPrams.ValueDigits);
 			}
 			public void PushData(ref byte[] dataArr){
 				if(dataArr.Length<12){			return;			}
@@ -288,9 +289,11 @@ namespace UDP_client
 			}
 			
 			public void CalcStatistic(){
-				decimal ma, sigma, median, moda;
+				decimal ma, sigmaS=0, sigmaF, median, moda;
 				long prevTicks=0;
-				
+				long tFlush, tMA, tSigmaS=0, tSigmaF, tMedian, tModa;
+ 				int newPacketsOnCalcTime;
+				TimeSpan timeToClac;
 
 				lock(locker){
 					//	лок нужен чтоб ThreadProcess() не добавлял новых значений в хранилище пока мы считаем параметры
@@ -300,45 +303,60 @@ namespace UDP_client
 					int currQueueLen = inputBuffer.Count;
 					DatastoreUpdate();
 					DataPutToStore(currQueueLen);
-					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   Queue flush.");
+					if(valuesInStore==0){
+						Console.WriteLine("No valuses in store.");
+						return;
+					}
+					tFlush = timer.ElapsedTicks;
 					prevTicks = timer.ElapsedTicks;
 
-					Console.WriteLine("valuses in store = " + valuesInStore + "     psges = " + pages.Count);
-					if(valuesInStore==0){		return;		}
-					
 					ma = CalcMA_Fast();
-					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   MA = " + ma);
+					tMA = timer.ElapsedTicks-prevTicks;
 					prevTicks = timer.ElapsedTicks;
-					
+
 					if(pages.Count<100){
-						sigma = CalcSigma_Slow(ma);
-						Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   sigma (slow) = " + sigma);
+						sigmaS = CalcSigma_Slow(ma);
+						tSigmaS = timer.ElapsedTicks-prevTicks;
 						prevTicks = timer.ElapsedTicks;
 					}
-					
-					sigma = CalcSigma_Fast(ma);
-					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   sigma (fast) = " + sigma);
+
+					sigmaF = CalcSigma_Fast(ma);
+					tSigmaF = timer.ElapsedTicks-prevTicks;
 					prevTicks = timer.ElapsedTicks;
 
 					median = CalcMedian();
-					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   Median = " + median);
+					tMedian = timer.ElapsedTicks-prevTicks;
 					prevTicks = timer.ElapsedTicks;
 
 					moda = CalcModa();
-					Console.WriteLine("dT = " + (timer.ElapsedTicks-prevTicks).ToString("000000") + "   Moda = " + moda);
+					tModa = timer.ElapsedTicks-prevTicks;
 					prevTicks = timer.ElapsedTicks;
+					timeToClac = timer.Elapsed;
 
+					newPacketsOnCalcTime = inputBuffer.Count;
+
+					Console.WriteLine("dT = " + tFlush.ToString("000000") + "   Queue flush.");
+					Console.WriteLine("valuses in store = " + valuesInStore + "     psges = " + pages.Count);
+					Console.WriteLine("dT = " + tMA.ToString("000000") + "   MA = " + ma);
+					if(pages.Count<100){
+						Console.WriteLine("dT = " + tSigmaS.ToString("000000") + "   sigma (slow) = " + sigmaS);
+					}
+					Console.WriteLine("dT = " + tSigmaF.ToString("000000") + "   sigma (fast) = " + sigmaF);
+					Console.WriteLine("dT = " + tMedian.ToString("000000") + "   Median = " + median);
+					Console.WriteLine("dT = " + tModa.ToString("000000") + "   Moda = " + moda);
+					
 					timer.Stop();
-					Console.WriteLine("total dT = "+ timer.ElapsedTicks + "   in MiliSec = " + timer.Elapsed.TotalMilliseconds);
-					Console.WriteLine("new data during calc time = "+ inputBuffer.Count);
+					Console.WriteLine("total dT to calc = "+ prevTicks + "   in MiliSec = " + timeToClac.TotalMilliseconds);
+					Console.WriteLine("total dT to print= "+ (timer.ElapsedTicks-prevTicks) + "   in MiliSec = " + (timer.Elapsed.TotalMilliseconds-timeToClac.TotalMilliseconds) );
+					Console.WriteLine("new data during calc time = " + newPacketsOnCalcTime + "     new data during all time = "+ inputBuffer.Count);
 				}
 			}
 
-			public StatisticCore(int inValPerPage, double inValMinStep){
+			public StatisticCore(int inValPerPage, int inDigits){
 				rnd = new Random();
 
 				cValPerPage = inValPerPage;
-				cValMinStep = inValMinStep;
+				cValMinStep = Math.Pow(10, -inDigits);
 
 				pgCoef = (decimal) (cValMinStep*cValPerPage);
 				pgValStep = (decimal) cValMinStep;
@@ -442,8 +460,8 @@ namespace UDP_client
 					Console.WriteLine("Не указан 'Port' подключения");
 					return false;
 				}
-				if(mySettings.StatCore.ValuesMinStep <= 0){
-					Console.WriteLine("Параметр 'ValuesMinStep' должен быть больше нуля");
+				if(mySettings.StatCore.ValueDigits <= 0){
+					Console.WriteLine("Параметр 'ValueDigits' должен быть в пределах [0, 10] и совпадать с заданным в генераторе.");
 					return false;
 				}
 				if(mySettings.StatCore.ValuesPerPage < 10){
@@ -463,8 +481,9 @@ namespace UDP_client
 			[XmlAttribute] public int DelayPerod;
 		}
 		public struct StatisticParms{
+			[XmlAttribute] public int ValueDigits;
 			[XmlAttribute] public int ValuesPerPage;
-			[XmlAttribute] public double ValuesMinStep;
+		//	[XmlAttribute] public double ValuesMinStep;
 		}
 
 		public ConnectionParms Connection;

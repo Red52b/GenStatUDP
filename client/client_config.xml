@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Setings xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-  <Connection CastGroup="235.35.35.0" Port="9762" DelayMiliSec="0" DelayPerod="0" />
-  <StatCore ValuesPerPage="100" ValuesMinStep="1e-4" />
+  <Connection CastGroup="235.35.35.0" Port="9762" DelayMiliSec="30" DelayPerod="100000" />
+  <StatCore ValueDigits="4" ValuesPerPage="100" />
 </Setings>
