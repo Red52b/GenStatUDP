@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Setings xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Connection CastGroup="235.35.35.0" Port="9762" DelayBetvenPackets="0" />
+  <StatCore FirstValue="15.5" ValueDigits="4" RndParam="1000" SinFreq="10000" SinAmplitude="20" />
+</Setings>
