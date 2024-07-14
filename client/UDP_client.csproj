@@ -10,8 +10,8 @@
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>UDP_client</RootNamespace>
     <AssemblyName>UDP_client</AssemblyName>
-    <TargetFrameworkVersion>v4.0</TargetFrameworkVersion>
-    <TargetFrameworkProfile>Client</TargetFrameworkProfile>
+    <TargetFrameworkVersion>v4.7</TargetFrameworkVersion>
+    <TargetFrameworkProfile></TargetFrameworkProfile>
     <FileAlignment>512</FileAlignment>
     <PublishUrl>publish\</PublishUrl>
     <Install>true</Install>
@@ -60,6 +60,10 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Settings\SetingsStruct.cs" />
+    <Compile Include="Settings\SettingsXmlHelper.cs" />
+    <Compile Include="Statistic\DataProcessor.cs" />
+    <Compile Include="Statistic\StatisticCore.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="client_config.xml">
